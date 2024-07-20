@@ -10,10 +10,9 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use retour::static_detour;
 use widestring::U16CString;
-use windows::core::{s, w, PCWSTR};
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::System::Console::AllocConsole;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MESSAGEBOX_STYLE};
 
 static RUNTIME: OnceCell<Lovely> = OnceCell::new();
@@ -22,9 +21,17 @@ static_detour! {
     pub static LuaLoadbuffer_Detour: unsafe extern "C" fn(*mut LuaState, *const u8, isize, *const u8) -> u32;
 }
 
+extern "C" {
+    pub fn luaL_loadbuffer(state: *mut LuaState, buf_ptr: *const u8, size: isize, name_ptr: *const u8) -> u32;
+}
+
 unsafe extern "C" fn lua_loadbuffer_detour(state: *mut LuaState, buf_ptr: *const u8, size: isize, name_ptr: *const u8) -> u32 {
     let rt = RUNTIME.get_unchecked();
     rt.apply_buffer_patches(state, buf_ptr, size, name_ptr)
+}
+
+unsafe extern "C" fn lua_loadbuffer_unwrapped(state: *mut LuaState, buf_ptr: *const u8, size: isize, name_ptr: *const u8) -> u32 {
+    LuaLoadbuffer_Detour.call(state, buf_ptr, size, name_ptr)
 }
 
 #[no_mangle]
@@ -53,16 +60,11 @@ unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *const c_void) -
     }
 
     // Initialize the lovely runtime.
-    let rt = Lovely::init(&|a, b, c, d| LuaLoadbuffer_Detour.call(a, b, c, d));
+    let rt = Lovely::init(lua_loadbuffer_unwrapped);
     RUNTIME.set(rt).unwrap_or_else(|_| panic!("Failed to instantiate runtime."));
 
-    // Quick and easy hook injection. Load the lua51.dll module at runtime, determine the address of the luaL_loadbuffer fn, hook it.
-    let handle = LoadLibraryW(w!("lua51.dll")).unwrap();
-    let proc = GetProcAddress(handle, s!("luaL_loadbuffer")).unwrap();
-    let fn_target = std::mem::transmute::<_, unsafe extern "C" fn(*mut c_void, *const u8, isize, *const u8) -> u32>(proc);
-
     LuaLoadbuffer_Detour.initialize(
-        fn_target,
+        luaL_loadbuffer,
         |a, b, c, d| lua_loadbuffer_detour(a, b, c, d)
     )
     .unwrap()

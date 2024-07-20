@@ -1,6 +1,6 @@
 use std::{ffi::CString, fs, path::PathBuf};
 
-use crate::sys::{self, LuaState};
+use crate::{sys::{self, LuaState}, LoadBuffer};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -17,11 +17,11 @@ impl ModulePatch {
     /// # Safety
     /// This function is unsafe as it interfaces directly with a series of dynamically loaded
     /// native lua functions.
-    pub unsafe fn apply<F: Fn(*mut LuaState, *const u8, isize, *const u8) -> u32>(
+    pub unsafe fn apply(
         &self, 
         file_name: &str, 
         state: *mut LuaState, 
-        lual_loadbuffer: &F,
+        lual_loadbuffer: LoadBuffer,
     ) -> bool {
         // Stop if we're not at the correct insertion point.
         if self.before != file_name {

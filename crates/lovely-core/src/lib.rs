@@ -23,19 +23,19 @@ pub mod sys;
 pub mod log;
 pub mod patch;
 
-type LoadBuffer = dyn Fn(*mut LuaState, *const u8, isize, *const u8) -> u32 + Send + Sync + 'static;
+type LoadBuffer = unsafe extern "C" fn(*mut LuaState, *const u8, isize, *const u8) -> u32;
 
 pub struct Lovely {
     pub mod_dir: PathBuf,
     pub is_vanilla: bool,
-    loadbuffer: &'static LoadBuffer,
+    loadbuffer: LoadBuffer,
     patch_table: PatchTable,
     rt_init: Once,
 }
 
 impl Lovely {
     /// Initialize the Lovely patch runtime.
-    pub fn init(loadbuffer: &'static LoadBuffer) -> Self {
+    pub fn init(loadbuffer: LoadBuffer) -> Self {
         let start = Instant::now();
 
         let args = std::env::args().skip(1).collect_vec();
@@ -51,13 +51,13 @@ impl Lovely {
                 .to_string_lossy()
                 .strip_suffix(".app")
                 .expect("Parent directory of current executable path was not an .app")
-                .replace(".", "_")
+                .replace('.', "_")
         } else {
             cur_exe
                 .file_stem()
                 .expect("Failed to get file_stem component of current executable path.")
                 .to_string_lossy()
-                .replace(".", "_")
+                .replace('.', "_")
         };
         let mut mod_dir = dirs::config_dir()
             .unwrap()
@@ -200,7 +200,7 @@ impl Lovely {
 #[derive(Default)]
 pub struct PatchTable {
     mod_dir: PathBuf,
-    loadbuffer: Option<&'static LoadBuffer>,
+    loadbuffer: Option<LoadBuffer>,
     targets: HashSet<String>,
     // Unsorted
     patches: Vec<(Patch, Priority)>,
@@ -329,7 +329,7 @@ impl PatchTable {
     }
 
     /// Set an override for lual_loadbuffer.
-    pub fn with_loadbuffer(self, loadbuffer: &'static LoadBuffer) -> Self {
+    pub fn with_loadbuffer(self, loadbuffer: LoadBuffer) -> Self {
         PatchTable {
             loadbuffer: Some(loadbuffer),
             ..self
@@ -357,7 +357,7 @@ impl PatchTable {
             code = code.replace(&field, &value);
         }
 
-        sys::load_module(state, "lovely", &code, self.loadbuffer.as_ref().unwrap())
+        sys::load_module(state, "lovely", &code, self.loadbuffer.unwrap())
     }
 
     /// Apply one or more patches onto the target's buffer.
@@ -402,7 +402,7 @@ impl PatchTable {
         let loadbuffer = self.loadbuffer.unwrap();
         for patch in module_patches {
             let result = unsafe {
-                patch.apply(target, lua_state, &loadbuffer)
+                patch.apply(target, lua_state, loadbuffer)
             };
 
             if result {
