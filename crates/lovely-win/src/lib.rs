@@ -1,18 +1,19 @@
 use std::env;
-use std::panic;
 use std::ffi::c_void;
+use std::panic;
 
 use lovely_core::log::*;
-use lovely_core::Lovely;
 use lovely_core::sys::LuaState;
+use lovely_core::Lovely;
 
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use retour::static_detour;
 use widestring::U16CString;
-use windows::core::{w, PCWSTR};
+use windows::core::{s, w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::System::Console::AllocConsole;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MESSAGEBOX_STYLE};
 
 static RUNTIME: OnceCell<Lovely> = OnceCell::new();
@@ -21,16 +22,24 @@ static_detour! {
     pub static LuaLoadbuffer_Detour: unsafe extern "C" fn(*mut LuaState, *const u8, isize, *const u8) -> u32;
 }
 
-extern "C" {
-    pub fn luaL_loadbuffer(state: *mut LuaState, buf_ptr: *const u8, size: isize, name_ptr: *const u8) -> u32;
+fn lua_loadbuffer_detour(
+    state: *mut LuaState,
+    buf_ptr: *const u8,
+    size: isize,
+    name_ptr: *const u8,
+) -> u32 {
+    unsafe {
+        let rt = RUNTIME.get_unchecked();
+        rt.apply_buffer_patches(state, buf_ptr, size, name_ptr)
+    }
 }
 
-unsafe extern "C" fn lua_loadbuffer_detour(state: *mut LuaState, buf_ptr: *const u8, size: isize, name_ptr: *const u8) -> u32 {
-    let rt = RUNTIME.get_unchecked();
-    rt.apply_buffer_patches(state, buf_ptr, size, name_ptr)
-}
-
-unsafe extern "C" fn lua_loadbuffer_unwrapped(state: *mut LuaState, buf_ptr: *const u8, size: isize, name_ptr: *const u8) -> u32 {
+unsafe extern "C" fn lua_loadbuffer_unwrapped(
+    state: *mut LuaState,
+    buf_ptr: *const u8,
+    size: isize,
+    name_ptr: *const u8,
+) -> u32 {
     LuaLoadbuffer_Detour.call(state, buf_ptr, size, name_ptr)
 }
 
@@ -61,15 +70,20 @@ unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *const c_void) -
 
     // Initialize the lovely runtime.
     let rt = Lovely::init(lua_loadbuffer_unwrapped);
-    RUNTIME.set(rt).unwrap_or_else(|_| panic!("Failed to instantiate runtime."));
+    RUNTIME
+        .set(rt)
+        .unwrap_or_else(|_| panic!("Failed to instantiate runtime."));
 
-    LuaLoadbuffer_Detour.initialize(
-        luaL_loadbuffer,
-        |a, b, c, d| lua_loadbuffer_detour(a, b, c, d)
-    )
-    .unwrap()
-    .enable()
-    .unwrap();
+    let handle = GetModuleHandleA(s!("lua51.dll")).unwrap();
+    let proc = GetProcAddress(handle, s!("luaL_loadbuffer")).unwrap();
+    let fn_target: unsafe extern "C" fn(*mut c_void, *const u8, isize, *const u8) -> u32 =
+        std::mem::transmute(proc);
+
+    LuaLoadbuffer_Detour
+        .initialize(fn_target, lua_loadbuffer_detour)
+        .unwrap()
+        .enable()
+        .unwrap();
 
     1
 }
